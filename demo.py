@@ -22,6 +22,9 @@ from torch.optim.adam import Adam
 from PIL import Image
 import pickle
 import warnings
+import albumentations as A
+import cv2
+import gc
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -42,7 +45,9 @@ print(
     f"Random Seed {SEED}, Style Control [Start Step, End Step] = [{START_STEP}, {END_STEP}], Style Control Layer Index = {LAYER_INDEX}"
 )
 
-torch.cuda.set_device(0)  # set the GPU device
+# torch.cuda.set_device(0)  # set the GPU device
+# os.environ["CUDA_VISIBLE_DEVICES"] = "3"  # set the GPU device
+print("torch cuda available: ", torch.cuda.is_available(), torch.cuda.current_device())
 seed_everything(SEED)
 
 # Note that you may add your Hugging Face token to get access to the models
@@ -57,7 +62,7 @@ scheduler = DDIMScheduler(
 )
 model = ZstarPipeline.from_pretrained(
     STABLE_DIFFUSION_MODEL_PATH, scheduler=scheduler).to(device)
-
+print(type(model))
 
 def load_img_to_numpy(image_path):
     if type(image_path) is str:
@@ -331,9 +336,22 @@ def parse_args():
                         default="./content_images/", help='content image paths')
     parser.add_argument('--style_img_folder', type=str,
                         default="./style_images/", help='style image paths')
+    parser.add_argument('--null_style_inversion', action='store_true',
+                        help='whether to use null_style_inversion')
+    parser.add_argument("--use_adain", action='store_true',
+                        help="whether to use adain to generate initial noise")
+    parser.add_argument("--contrast_agumentation", action='store_true',
+                        help="whether to use contrast agumentation")
     args = parser.parse_args()
     return args
 
+def adain(cnt_feat, sty_feat):
+    cnt_mean = cnt_feat.mean(dim=[0, 2, 3],keepdim=True)
+    cnt_std = cnt_feat.std(dim=[0, 2, 3],keepdim=True)
+    sty_mean = sty_feat.mean(dim=[0, 2, 3],keepdim=True)
+    sty_std = sty_feat.std(dim=[0, 2, 3],keepdim=True)
+    output = ((cnt_feat-cnt_mean)/cnt_std)*sty_std + sty_mean
+    return output
 
 def main():
     args = parse_args()
@@ -372,18 +390,59 @@ def main():
             )
             with open(pickle_file_name, "wb") as f:
                 pickle.dump([content_latent_list, x_t, uncond_embeddings], f)
-        start_code_content = x_t.expand(len(prompts), -1, -1, -1)
+        # start_code_content = x_t.expand(len(prompts), -1, -1, -1)
         for style in style_list:
             style_image = load_image(style, device)
-            editor = AttentionBase()
-            regiter_attention_editor_diffusers(model, editor)
-            _, style_latent_list = model.invert(
-                style_image,
-                source_prompt,
-                guidance_scale=7.5,
-                num_inference_steps=TOTAL_STEP,
-                return_intermediates=True,
-            )
+            if args.null_style_inversion:
+                print("Using null_style_inversion")
+                _, style_latent_list, s_t, _ = null_inversion.invert(
+                    style, prompts, verbose=True
+                )
+            else:
+                editor = AttentionBase()
+                regiter_attention_editor_diffusers(model, editor)
+                _, style_latent_list = model.invert(
+                    style_image,
+                    source_prompt,
+                    guidance_scale=7.5,
+                    num_inference_steps=TOTAL_STEP,
+                    return_intermediates=True,
+                )
+            
+            print(f"content: {content}, content_latent_shape: {content_latent_list[-1].shape}, {x_t.shape}")
+            print(f"style: {style}, style_latent_shape: {style_latent_list[-1].shape}")
+            # print(f"start_code_content_shape: {start_code_content.shape}")
+            if args.use_adain:
+                print("Using AdaIN to generate initial noise")
+                adain_latent = adain(content_latent_list[-1], style_latent_list[-1])
+                start_code_content = adain_latent.expand(len(prompts), -1, -1, -1)
+            else:
+                start_code_content = x_t.expand(len(prompts), -1, -1, -1)
+                
+            # contrast agumentation
+            if args.contrast_agumentation:
+                transform = transforms.Compose([
+                    transforms.Resize((TARGET_IMG_SIZE,TARGET_IMG_SIZE)),
+                    transforms.ColorJitter(brightness=(0,5), contrast=
+                        (0,5), saturation=(0,5), hue=(-0.1, 0.1))
+                ])
+                style_image_constrast = transform(style_image)
+
+                _, style_latent__constrast_list = model.invert(
+                    style_image_constrast,
+                    source_prompt,
+                    guidance_scale=7.5,
+                    num_inference_steps=TOTAL_STEP,
+                    return_intermediates=True,
+                )
+                #adain_latent_colorized = adain(content_latent_list[-1], )
+                adain_latent_constrast = adain(content_latent_list[-1], style_latent__constrast_list[-1])
+                adain_latent = adain(content_latent_list[-1], style_latent_list[-1])
+
+                p=0.8
+                adain_mixed = p*adain_latent + (1-p)*adain_latent_constrast
+                start_code_content = adain_mixed.expand(len(prompts), -1, -1, -1)
+                
             # hijack the attention module
             editor = ReweightCrossAttentionControl(
                 START_STEP,
@@ -436,6 +495,9 @@ def main():
                              "_reconstructed.png"),
             )
             print("Syntheiszed images are saved in ", full_image_path)
+            gc.collect()
+            
+        gc.collect()
 
 
 if __name__ == "__main__":
