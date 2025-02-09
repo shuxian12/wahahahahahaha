@@ -1,5 +1,6 @@
 > [!NOTE]
-> Apologies for the delay in code submission due to other ongoing commitments. We have created this repository to ensure that interested readers can locate the official source for our work. Thank you for your understanding and stay tuned for updates.
+> Fork from [Z-STAR: Zero-shot Style Transfer via Attention Reweighting](https://github.com/HolmesShuan/Zero-shot-Style-Transfer-via-Attention-Rearrangement) (CVPR2024) \
+> NTU 2025 Fall CVPDL Final Project
 
 ## Project Name
 Z-STAR: Zero-shot Style Transfer via Attention Rearrangement (Reweighting)
